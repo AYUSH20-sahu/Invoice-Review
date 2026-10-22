@@ -250,6 +250,13 @@ export default function DocViewer({
                         }
                       }}
                     >
+                      {/* Dev Coordinates Tag on every bounding box */}
+                      {showDevCoords && (
+                        <div className="bbox-dev-tag" title={`X1: ${f.bbox[0]}, Y1: ${f.bbox[1]}, X2: ${f.bbox[2]}, Y2: ${f.bbox[3]}`}>
+                          [{f.bbox[0]}, {f.bbox[1]}, {f.bbox[2]}, {f.bbox[3]}]
+                        </div>
+                      )}
+
                       {/* Label badge for active or hovered field */}
                       {(isActive || isHovered) && (
                         <div className="bbox-label-badge">
@@ -290,22 +297,31 @@ export default function DocViewer({
       </div>
 
       {/* Dev Coordinates Floating HUD */}
-      {showDevCoords && hoverCoords && (
+      {showDevCoords && (
         <div className="dev-coords-hud" role="status" aria-live="polite">
           <div className="hud-header">
-            DEV COORDINATE INSPECTOR (Page {hoverCoords.page})
+            <span className="dev-pulse-dot" />
+            DEV COORDINATE INSPECTOR {hoverCoords ? `(Page ${hoverCoords.page})` : "(Active)"}
           </div>
-          <div className="hud-row">
-            <span>612px Point Space:</span>
-            <strong>
-              X: {hoverCoords.x}px, Y: {hoverCoords.y}px
-            </strong>
-          </div>
-          <div className="hud-row">
-            <span>Normalized (0-1):</span>
-            <strong>[{hoverCoords.normX}, {hoverCoords.normY}]</strong>
-          </div>
-          <div className="hud-tip">Click & drag to measure bounding box</div>
+          {hoverCoords ? (
+            <>
+              <div className="hud-row">
+                <span>612px Point Space:</span>
+                <strong>
+                  X: {hoverCoords.x}px, Y: {hoverCoords.y}px
+                </strong>
+              </div>
+              <div className="hud-row">
+                <span>Normalized (0-1):</span>
+                <strong>[{hoverCoords.normX}, {hoverCoords.normY}]</strong>
+              </div>
+            </>
+          ) : (
+            <div className="hud-row hud-waiting">
+              <span>Move mouse over document to track (X, Y) points</span>
+            </div>
+          )}
+          <div className="hud-tip">All box coordinates are highlighted in cyan</div>
         </div>
       )}
     </div>

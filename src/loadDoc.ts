@@ -178,6 +178,14 @@ export async function loadDocument(file: File): Promise<DocLoadResult> {
     return loadPDFDocument(file);
   }
 
+  const isSvg =
+    file.type === "image/svg+xml" ||
+    file.name.toLowerCase().endsWith(".svg");
+
+  if (isSvg) {
+    return loadSvgDocument(file);
+  }
+
   const isImage =
     file.type.startsWith("image/") ||
     /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i.test(file.name);
@@ -186,7 +194,7 @@ export async function loadDocument(file: File): Promise<DocLoadResult> {
     return loadImageDocument(file);
   }
 
-  throw new Error("Unsupported file format. Please upload a PDF, PNG, JPG, or WebP document.");
+  throw new Error("Unsupported file format. Please upload a PDF, PNG, JPG, JPEG, WebP, or SVG document.");
 }
 
 /**
@@ -494,130 +502,225 @@ function analyzeDocumentSpans(spans: TextSpan[], pages: Page[]): Field[] {
       }
     } else {
       // -------------------------------------------------------------
-      // STANDARD INVOICE DYNAMIC EXTRACTION
+      // COMPREHENSIVE DYNAMIC INVOICE EXTRACTION (TAX INVOICES, LOGISTICS, COMMERCIAL)
       // -------------------------------------------------------------
+
+      // 1. Vendor / Supplier Name & Information (Page 1 top header)
       if (pageNum === 1) {
         const headerCandidate = lines.find(
-          (l) => l.bbox[1] < 120 && l.text.length > 5 && !/(?:tax\s*invoice|original|duplicate|gst|invoice\s*no)/i.test(l.text)
+          (l) => l.bbox[1] < 130 && l.text.length > 4 && !/(?:tax\s*invoice|original|duplicate|triplicate|gst|invoice\s*no|bill\s*of\s*supply)/i.test(l.text)
         );
         if (headerCandidate) {
           addField("vendor_name", "Vendor / Supplier Name", headerCandidate.text, pageNum, headerCandidate.bbox, "parties", 0.99);
         }
       }
 
+      // 2. Invoice Number
       for (let i = 0; i < lines.length; i++) {
         const l = lines[i];
         if (/(?:invoice\s*no\.?|inv\s*no\.?|bill\s*no\.?|invoice\s*#)/i.test(l.text)) {
           const found = findValueNear(i, /(?:invoice\s*no\.?|inv\s*no\.?|bill\s*no\.?|invoice\s*#)[\s:]*/i);
           if (found) {
             addField("invoicenumber", "Invoice Number", found.val, pageNum, found.bbox, "header", 0.99);
+            break;
           }
-          break;
         }
       }
 
+      // 3. Invoice Date
       for (let i = 0; i < lines.length; i++) {
         const l = lines[i];
-        if (/(?:dated|invoice\s*date|date[\s:]*$)/i.test(l.text)) {
+        if (/(?:dated|invoice\s*date|date[\s:]*$)/i.test(l.text) && !/delivery|due|order|po/i.test(l.text)) {
           const found = findValueNear(i, /(?:dated|invoice\s*date|date)[\s:]*/i);
           if (found) {
             addField("date", "Invoice Date", found.val, pageNum, found.bbox, "header", 0.98);
+            break;
           }
-          break;
         }
       }
 
+      // 4. Due Date
       for (let i = 0; i < lines.length; i++) {
         const l = lines[i];
-        if (/due\s*date/i.test(l.text)) {
-          const found = findValueNear(i, /due\s*date[\s:]*/i);
+        if (/due\s*date|payment\s*due/i.test(l.text)) {
+          const found = findValueNear(i, /(?:due\s*date|payment\s*due)[\s:]*/i);
           if (found) {
             addField("due_date", "Due Date", found.val, pageNum, found.bbox, "header", 0.96);
-          }
-          break;
-        }
-      }
-
-      for (let i = 0; i < lines.length; i++) {
-        const l = lines[i];
-        if (/consignee|ship\s*to/i.test(l.text)) {
-          const found = findValueNear(i, /(?:consignee\s*(?:\([^)]*\))?|ship\s*to)[\s:]*/i);
-          if (found) {
-            addField("consignee_name", "Consignee (Ship to)", found.val, pageNum, found.bbox, "parties", 0.96);
-          }
-        }
-        if (/buyer|bill\s*to/i.test(l.text)) {
-          const found = findValueNear(i, /(?:buyer\s*(?:\([^)]*\))?|bill\s*to)[\s:]*/i);
-          if (found) {
-            addField("customer_name", "Buyer (Bill to)", found.val, pageNum, found.bbox, "parties", 0.97);
+            break;
           }
         }
       }
 
+      // 5. Complete Shipping & Logistics Section
+      const shippingPatterns = [
+        { key: "consignee_name", label: "Consignee (Ship to)", regex: /(?:consignee\s*(?:\([^)]*\))?|ship\s*to)[\s:]*/i },
+        { key: "customer_name", label: "Buyer (Bill to)", regex: /(?:buyer\s*(?:\([^)]*\))?|bill\s*to)[\s:]*/i },
+        { key: "delivery_note", label: "Delivery Note", regex: /delivery\s*note(?!\s*date)[\s:]*/i },
+        { key: "delivery_note_date", label: "Delivery Note Date", regex: /delivery\s*note\s*date[\s:]*/i },
+        { key: "suppliers_ref", label: "Supplier's Ref.", regex: /supplier(?:'s)?\s*ref(?:\.|\b)[\s:]*/i },
+        { key: "other_references", label: "Other Reference(s)", regex: /other\s*ref(?:erence)?s?[\s:]*/i },
+        { key: "buyers_order_no", label: "Buyer's Order No.", regex: /(?:buyer(?:'s)?\s*order\s*no\.?|purchase\s*order\s*no\.?|po\s*no\.?)[\s:]*/i },
+        { key: "order_date", label: "Order / PO Date", regex: /(?:order\s*date|po\s*date)[\s:]*/i },
+        { key: "dispatch_doc_no", label: "Despatch Document No.", regex: /(?:despatch|dispatch)\s*doc(?:ument)?\s*no\.?[\s:]*/i },
+        { key: "dispatched_through", label: "Despatched through", regex: /(?:despatched|dispatched)\s*through[\s:]*/i },
+        { key: "destination", label: "Destination", regex: /destination\b[\s:]*/i },
+        { key: "terms_of_delivery", label: "Terms of Delivery", regex: /terms\s*of\s*delivery[\s:]*/i },
+        { key: "payment_terms", label: "Mode / Terms of Payment", regex: /mode\s*(?:\/\s*terms)?\s*of\s*payment[\s:]*/i },
+        { key: "vehicle_no", label: "Motor Vehicle No.", regex: /(?:motor\s*vehicle\s*no\.?|vehicle\s*no\.?|truck\s*no\.?)[\s:]*/i },
+        { key: "lr_rr_no", label: "Bill of Lading / LR-RR No.", regex: /(?:bill\s*of\s*lading|lr[-/ ]?rr\s*no|lr\s*no\.?)[\s:]*/i },
+        { key: "place_of_delivery", label: "Place of Delivery", regex: /place\s*of\s*delivery[\s:]*/i },
+      ];
+
+      shippingPatterns.forEach(({ key, label, regex }) => {
+        for (let i = 0; i < lines.length; i++) {
+          if (regex.test(lines[i].text)) {
+            const found = findValueNear(i, regex);
+            if (found && found.val.length > 1) {
+              const sec: FieldSection = key.includes("order") || key.includes("date") || key.includes("delivery_note") ? "header" : "parties";
+              addField(key, label, found.val, pageNum, found.bbox, sec, 0.96);
+              break;
+            }
+          }
+        }
+      });
+
+      // 6. GSTIN Numbers (Vendor, Buyer, Consignee)
       for (let i = 0; i < lines.length; i++) {
         const l = lines[i];
         const gstMatch = l.text.match(/\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z0-9]{3}\b/);
         if (gstMatch) {
-          const label = l.bbox[1] < 180 ? "Vendor GSTIN" : "Buyer GSTIN";
-          const key = l.bbox[1] < 180 ? "vendor_gstin" : "buyer_gstin";
+          const isTop = l.bbox[1] < 200;
+          const isConsignee = /consignee|ship/i.test(l.text) || (lines[i - 1] && /consignee|ship/i.test(lines[i - 1].text));
+          const label = isTop ? "Vendor GSTIN" : (isConsignee ? "Consignee GSTIN" : "Buyer GSTIN");
+          const key = isTop ? "vendor_gstin" : (isConsignee ? "consignee_gstin" : "buyer_gstin");
           addField(key, label, gstMatch[0], pageNum, l.bbox, "parties", 0.98);
         }
       }
 
+      // 7. State & Place of Supply
       for (let i = 0; i < lines.length; i++) {
         const l = lines[i];
-        if (/state\s*name|place\s*of\s*supply/i.test(l.text)) {
-          const val = l.text.replace(/^.*?(?:state\s*name|place\s*of\s*supply)[\s:]*/i, "").trim();
+        if (/state\s*name|place\s*of\s*supply|state\s*code/i.test(l.text)) {
+          const val = l.text.replace(/^.*?(?:state\s*name|place\s*of\s*supply|state\s*code)[\s:]*/i, "").trim();
           if (val) {
             const key = /place\s*of\s*supply/i.test(l.text) ? "place_of_supply" : "state_name";
-            addField(key, "State / Place of Supply", val, pageNum, l.bbox, "parties", 0.92);
+            addField(key, "State / Place of Supply", val, pageNum, l.bbox, "parties", 0.94);
           }
         }
       }
 
-      let itemCount = 0;
+      // 8. Comprehensive Dynamic Line Items Table Extraction
+      // Step A: Find table header line
+      let tableHeaderIdx = -1;
       for (let i = 0; i < lines.length; i++) {
-        const l = lines[i];
-        const isItemRow =
-          l.bbox[1] > 200 &&
-          l.bbox[1] < 620 &&
-          /^[0-9]\s+[A-Za-z]|(?:UPVC|WINDOW|DOOR|CLUSTER|SLA|SERVICE|ITEM|PANEL|GLASS)/i.test(l.text) &&
-          !/(?:cgst|sgst|round\s*off|total|taxable|amount\s*chargeable)/i.test(l.text);
-
-        if (isItemRow && itemCount < 8) {
-          itemCount++;
-          const rowSpans = pageSpans.filter((s) => Math.abs(s.y1 - l.bbox[1]) <= 10);
-          const amountSpan = rowSpans.find((s) => s.x1 > 400 && /[0-9,]+\.[0-9]{2}/.test(s.text));
-
-          const itemLabel = `Item ${itemCount}`;
-          const itemVal = amountSpan ? `${l.text} — ₹${amountSpan.text}` : l.text;
-          const bbox: RawBBox = amountSpan
-            ? [Math.min(l.bbox[0], amountSpan.x1), Math.min(l.bbox[1], amountSpan.y1), Math.max(l.bbox[2], amountSpan.x2), Math.max(l.bbox[3], amountSpan.y2)]
-            : l.bbox;
-
-          addField(`item_${itemCount}`, itemLabel, itemVal, pageNum, bbox, "line_items", 0.95);
+        const txt = lines[i].text.toLowerCase();
+        const hasDesc = /description|particulars|item|product|goods/.test(txt);
+        const hasCol = /hsn|sac|qty|quantity|rate|unit|price|amount|taxable|value|s\.?no|sl\.?no/.test(txt);
+        if (hasDesc && hasCol && lines[i].bbox[1] >= 140 && lines[i].bbox[1] <= 450) {
+          tableHeaderIdx = i;
+          break;
         }
       }
 
+      const tableTopY = tableHeaderIdx !== -1 ? lines[tableHeaderIdx].bbox[3] + 4 : 200;
+
+      // Step B: Find table boundary (subtotal / totals / taxes)
+      let tableBottomY = Math.min(650, (pages[pageNum - 1]?.height || 792) - 120);
       for (let i = 0; i < lines.length; i++) {
         const l = lines[i];
-        if (/cgst/i.test(l.text)) {
+        if (l.bbox[1] > tableTopY && /(?:sub\s*total|total\b|cgst|sgst|igst|taxable\s*value|tax\s*amount|round\s*off|amount\s*chargeable|in\s*words|terms\s*&|bank\s*details|declaration)/i.test(l.text)) {
+          tableBottomY = Math.min(tableBottomY, l.bbox[1] - 4);
+          break;
+        }
+      }
+
+      // Step C: Cluster lines in table band into item rows
+      const tableLines = lines.filter(
+        (l) => l.bbox[1] >= tableTopY && l.bbox[3] <= tableBottomY &&
+               !/(?:description|particulars|quantity|rate|amount|unit\s*price|hsn)/i.test(l.text) &&
+               l.text.trim().length > 1
+      );
+
+      // Group table lines by vertical row band (within 8pt Y)
+      const itemRows: { y: number; lines: typeof lines }[] = [];
+      tableLines.forEach((tl) => {
+        const existing = itemRows.find((r) => Math.abs(r.y - tl.y) <= 8);
+        if (existing) {
+          existing.lines.push(tl);
+        } else {
+          itemRows.push({ y: tl.y, lines: [tl] });
+        }
+      });
+
+      let itemCount = 0;
+      itemRows.sort((a, b) => a.y - b.y);
+
+      itemRows.forEach((row) => {
+        row.lines.sort((a, b) => a.bbox[0] - b.bbox[0]);
+        const fullRowText = row.lines.map((l) => l.text).join(" ").trim();
+        if (!fullRowText || /(?:total|taxable|cgst|sgst|round\s*off)/i.test(fullRowText)) return;
+
+        // Skip rows that are purely numbers or dashes
+        const hasAlpha = /[A-Za-z]/.test(fullRowText);
+        if (!hasAlpha && fullRowText.length < 5) return;
+
+        itemCount++;
+        const rowBbox: RawBBox = [
+          Math.min(...row.lines.map((l) => l.bbox[0])),
+          Math.min(...row.lines.map((l) => l.bbox[1])),
+          Math.max(...row.lines.map((l) => l.bbox[2])),
+          Math.max(...row.lines.map((l) => l.bbox[3])),
+        ];
+
+        addField(`item_${itemCount}`, `Item ${itemCount}`, fullRowText, pageNum, rowBbox, "line_items", 0.96);
+      });
+
+      // Fallback: If no table header was detected, find lines with description + price
+      if (itemCount === 0) {
+        for (let i = 0; i < lines.length; i++) {
+          const l = lines[i];
+          const isMid = l.bbox[1] > 180 && l.bbox[1] < 620;
+          const hasPrice = /[0-9,]+\.[0-9]{2}/.test(l.text);
+          const notTotal = !/(?:total|cgst|sgst|tax|round|chargeable|inr|words|subtotal)/i.test(l.text);
+
+          if (isMid && hasPrice && notTotal && itemCount < 10) {
+            itemCount++;
+            addField(`item_${itemCount}`, `Item ${itemCount}`, l.text, pageNum, l.bbox, "line_items", 0.93);
+          }
+        }
+      }
+
+      // 9. Taxes, Discounts & Totals
+      for (let i = 0; i < lines.length; i++) {
+        const l = lines[i];
+        if (/\bcgst\b/i.test(l.text)) {
           const amountMatch = l.text.match(/[0-9,]+\.[0-9]{2}/);
           const val = amountMatch ? amountMatch[0] : l.text;
           addField("cgst_amount", "CGST Tax", val, pageNum, l.bbox, "totals", 0.98);
         }
-        if (/sgst/i.test(l.text)) {
+        if (/\bsgst\b/i.test(l.text)) {
           const amountMatch = l.text.match(/[0-9,]+\.[0-9]{2}/);
           const val = amountMatch ? amountMatch[0] : l.text;
           addField("sgst_amount", "SGST Tax", val, pageNum, l.bbox, "totals", 0.98);
+        }
+        if (/\bigst\b/i.test(l.text)) {
+          const amountMatch = l.text.match(/[0-9,]+\.[0-9]{2}/);
+          const val = amountMatch ? amountMatch[0] : l.text;
+          addField("igst_amount", "IGST Tax", val, pageNum, l.bbox, "totals", 0.98);
         }
         if (/round\s*off/i.test(l.text)) {
           const amountMatch = l.text.match(/[0-9,]+\.[0-9]{2}/);
           const val = amountMatch ? amountMatch[0] : l.text;
           addField("round_off", "Round Off", val, pageNum, l.bbox, "totals", 0.95);
         }
+        if (/sub\s*total|taxable\s*value|taxable\s*amount/i.test(l.text)) {
+          const amountMatch = l.text.match(/[0-9,]+\.[0-9]{2}/);
+          const val = amountMatch ? amountMatch[0] : l.text;
+          addField("subtotal", "Subtotal (Taxable)", val, pageNum, l.bbox, "totals", 0.97);
+        }
       }
 
+      // 10. Grand Total Amount
       for (let i = lines.length - 1; i >= 0; i--) {
         const l = lines[i];
         if (
@@ -631,12 +734,34 @@ function analyzeDocumentSpans(spans: TextSpan[], pages: Page[]): Field[] {
         }
       }
 
+      // 11. Amount in Words
       for (let i = 0; i < lines.length; i++) {
         const l = lines[i];
         if (/(?:in\s*words|amount\s*chargeable|inr|rupees)\b.*(?:only)/i.test(l.text) || /^[A-Z\s]+only$/i.test(l.text)) {
           const val = l.text.replace(/^.*?(?:in\s*words|amount\s*chargeable\s*(?:\([^)]*\))?)[\s:]*/i, "").trim();
           addField("amount_in_words", "Amount in Words", val || l.text, pageNum, l.bbox, "totals", 0.95);
           break;
+        }
+      }
+
+      // 12. Banking & Remittance Details
+      for (let i = 0; i < lines.length; i++) {
+        const l = lines[i];
+        if (/bank\s*name/i.test(l.text)) {
+          const found = findValueNear(i, /bank\s*name[\s:]*/i);
+          if (found) addField("bank_name", "Bank Name", found.val, pageNum, found.bbox, "custom", 0.95);
+        }
+        if (/(?:a\/c|account)\s*no\.?/i.test(l.text)) {
+          const found = findValueNear(i, /(?:a\/c|account)\s*no\.?[\s:]*/i);
+          if (found) addField("account_number", "Bank Account No.", found.val, pageNum, found.bbox, "custom", 0.96);
+        }
+        if (/ifsc\s*code/i.test(l.text)) {
+          const found = findValueNear(i, /ifsc\s*code[\s:]*/i);
+          if (found) addField("ifsc_code", "IFSC Code", found.val, pageNum, found.bbox, "custom", 0.97);
+        }
+        if (/pan\s*no\.?/i.test(l.text)) {
+          const found = findValueNear(i, /pan\s*no\.?[\s:]*/i);
+          if (found) addField("pan_number", "PAN Number", found.val, pageNum, found.bbox, "parties", 0.96);
         }
       }
     }
@@ -668,6 +793,94 @@ function analyzeDocumentSpans(spans: TextSpan[], pages: Page[]): Field[] {
   });
 
   return fields;
+}
+
+/**
+ * SVG document loader with vector text extraction and dynamic canvas rendering
+ */
+async function loadSvgDocument(file: File): Promise<DocLoadResult> {
+  const svgText = await file.text();
+
+  // Extract dimensions from viewBox or width/height attributes
+  const vbMatch = svgText.match(/viewBox\s*=\s*["']([\d.-]+)[\s,]+([\d.-]+)[\s,]+([\d.-]+)[\s,]+([\d.-]+)["']/i);
+  let svgW = 612;
+  let svgH = 792;
+  if (vbMatch) {
+    svgW = Math.max(100, parseFloat(vbMatch[3]));
+    svgH = Math.max(100, parseFloat(vbMatch[4]));
+  } else {
+    const wMatch = svgText.match(/width\s*=\s*["']([\d.]+)p?t?["']/i);
+    const hMatch = svgText.match(/height\s*=\s*["']([\d.]+)p?t?["']/i);
+    if (wMatch && hMatch) {
+      svgW = Math.max(100, parseFloat(wMatch[1]));
+      svgH = Math.max(100, parseFloat(hMatch[1]));
+    }
+  }
+
+  const scale = PAGE_W / svgW;
+  const pageH = Math.round(svgH * scale);
+
+  // Extract vector text spans if <text> elements are present
+  const spans: TextSpan[] = [];
+  const textElemRegex = /<text[^>]*\bx\s*=\s*["']([\d.-]+)["'][^>]*\by\s*=\s*["']([\d.-]+)["'][^>]*>([^<]+)<\/text>/gi;
+  let m;
+  while ((m = textElemRegex.exec(svgText)) !== null) {
+    const rawX = parseFloat(m[1]) * scale;
+    const rawY = parseFloat(m[2]) * scale;
+    const cleanText = m[3].replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").trim();
+    if (!cleanText) continue;
+    const fontSize = 12;
+    const estW = Math.max(16, cleanText.length * 6.5);
+    spans.push({
+      text: cleanText,
+      x1: Math.max(0, Math.min(PAGE_W, Math.round(rawX))),
+      y1: Math.max(0, Math.min(pageH, Math.round(rawY - fontSize))),
+      x2: Math.max(0, Math.min(PAGE_W, Math.round(rawX + estW))),
+      y2: Math.max(0, Math.min(pageH, Math.round(rawY + 2))),
+      fontSize,
+      page: 1,
+    });
+  }
+
+  // Render SVG onto 2x retina canvas
+  const canvas = document.createElement("canvas");
+  canvas.width = PAGE_W * 2;
+  canvas.height = pageH * 2;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Could not initialize canvas context for SVG.");
+
+  const blob = new Blob([svgText], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error("Failed to render SVG image."));
+    img.src = url;
+  });
+
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  URL.revokeObjectURL(url);
+
+  // If no raw <text> tags in SVG (e.g. paths/shapes), scan rendered canvas
+  if (spans.length === 0) {
+    const scanned = await scanCanvasPageForSpans(canvas, 1, pageH);
+    spans.push(...scanned);
+  }
+
+  const page: Page = {
+    src: canvas.toDataURL("image/png"),
+    width: PAGE_W,
+    height: pageH,
+    pageNumber: 1,
+  };
+
+  const fields = analyzeDocumentSpans(spans, [page]);
+
+  return {
+    pages: [page],
+    fields: sortFieldsByInvoiceOrder(fields),
+  };
 }
 
 /**

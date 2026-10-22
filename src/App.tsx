@@ -68,12 +68,20 @@ export default function App() {
   const [groupBySection, setGroupBySection] = useState<boolean>(true);
   const [showDevCoords, setShowDevCoords] = useState<boolean>(false);
   const [zoomLevel, setZoomLevel] = useState<number>(1);
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     return (localStorage.getItem("theme") as "dark" | "light") ||
       (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   });
   const [showShortcutsModal, setShowShortcutsModal] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<"fields" | "log">("fields");
+
+  const showToast = (msg: string) => {
+    setToastMsg(msg);
+    setTimeout(() => {
+      setToastMsg((cur) => (cur === msg ? null : cur));
+    }, 3200);
+  };
 
   // Keep refs for keyboard shortcuts
   const activeIdRef = useRef(activeId);
@@ -526,9 +534,13 @@ export default function App() {
         return;
       }
 
-      if (e.key === "d" || e.key === "D") {
+      if (e.key === "d" || e.key === "D" || e.key === "x" || e.key === "X") {
         e.preventDefault();
-        setShowDevCoords((prev) => !prev);
+        setShowDevCoords((prev) => {
+          const next = !prev;
+          showToast(next ? "📐 Coordinate Inspector ON — Box coordinates and crosshairs enabled" : "Coordinate Inspector turned OFF");
+          return next;
+        });
         return;
       }
 
@@ -716,16 +728,16 @@ export default function App() {
             ↺ Reset to Sample
           </button>
 
-          <label className="btn btn-primary file-upload-label">
+          <label className="btn btn-primary file-upload-label" title="Import PDF, PNG, JPG, JPEG, WebP, or SVG invoice document">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-              <polyline points="17 8 12 3 7 8"></polyline>
-              <line x1="12" y1="3" x2="12" y2="15"></line>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
             </svg>
-            <span>{pages.length ? "Replace Doc" : "Upload Invoice"}</span>
+            <span>Import Docs</span>
             <input
               type="file"
-              accept="application/pdf,image/png,image/jpeg,image/webp"
+              accept=".pdf,application/pdf,image/png,image/jpeg,image/jpg,image/webp,image/svg+xml,.svg,.png,.jpg,.jpeg,.webp"
               hidden
               onChange={(e) => handleFileUpload(e.target.files?.[0])}
             />
@@ -734,12 +746,19 @@ export default function App() {
           <div className="header-divider"></div>
 
           <button
-            className={`btn-icon ${showDevCoords ? "active" : ""}`}
-            onClick={() => setShowDevCoords((prev) => !prev)}
-            title="Toggle Dev Coordinate Inspector (D)"
+            className={`btn-coords-toggle ${showDevCoords ? "active" : ""}`}
+            onClick={() => {
+              setShowDevCoords((prev) => {
+                const next = !prev;
+                showToast(next ? "📐 Coordinate Inspector ON — Box coordinates and crosshairs enabled" : "Coordinate Inspector turned OFF");
+                return next;
+              });
+            }}
+            title="Toggle Dev Coordinate Inspector (D or X)"
             aria-label="Toggle Dev Coordinate Inspector"
           >
             <span className="btn-icon-text">XY</span>
+            <span className="btn-coords-badge">{showDevCoords ? "ON" : "OFF"}</span>
           </button>
 
           <button
@@ -762,6 +781,15 @@ export default function App() {
         </div>
       </header>
 
+      {/* Toast Notification */}
+      {toastMsg && (
+        <div className="toast-notification" role="status" aria-live="polite">
+          <span className="toast-icon">ℹ️</span>
+          <span className="toast-text">{toastMsg}</span>
+          <button className="toast-dismiss" onClick={() => setToastMsg(null)}>✕</button>
+        </div>
+      )}
+
       {/* Global Error Banner */}
       {error && (
         <div className="alert-banner" role="alert">
@@ -777,13 +805,18 @@ export default function App() {
           <div className="empty-card">
             <div className="empty-icon-ring">📄</div>
             <h2>No Invoice Loaded</h2>
-            <p>Upload a PDF or image invoice to review extracted fields in the exact order they appear on the document.</p>
+            <p>Import a PDF, image, or SVG invoice to review extracted fields in the exact order they appear on the document.</p>
             <div className="empty-actions">
-              <label className="btn btn-primary btn-large">
-                Upload Invoice File
+              <label className="btn btn-primary btn-large file-upload-label">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                <span>Import Docs</span>
                 <input
                   type="file"
-                  accept="application/pdf,image/png,image/jpeg,image/webp"
+                  accept=".pdf,application/pdf,image/png,image/jpeg,image/jpg,image/webp,image/svg+xml,.svg,.png,.jpg,.jpeg,.webp"
                   hidden
                   onChange={(e) => handleFileUpload(e.target.files?.[0])}
                 />
@@ -792,7 +825,7 @@ export default function App() {
                 Explore With Sample Invoice
               </button>
             </div>
-            <p className="empty-formats">Supports PDF, PNG, JPG, and WebP. Pages are normalised to 612 CSS pt at 2x resolution.</p>
+            <p className="empty-formats">Supports PDF, PNG, JPG, JPEG, WebP, and SVG. Pages are scanned dynamically and normalised to 612 CSS pt at 2x resolution.</p>
           </div>
         </div>
       ) : (
