@@ -2,6 +2,12 @@ import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import DocViewer from "./DocViewer";
 import { loadDocument, generateSampleInvoice } from "./loadDoc";
 import {
+  DocumentSkeleton,
+  SidebarSkeleton,
+  SpiralSpinner,
+  ImportState,
+} from "./DocumentSkeleton";
+import {
   saveSession,
   loadSession,
   clearSession,
@@ -75,6 +81,10 @@ export default function App() {
   });
   const [showShortcutsModal, setShowShortcutsModal] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<"fields" | "log">("fields");
+
+  // Document importing buffer state
+  const [importState, setImportState] = useState<ImportState | null>(null);
+  const [isDraggingFile, setIsDraggingFile] = useState<boolean>(false);
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
@@ -299,10 +309,35 @@ export default function App() {
 
   async function handleFileUpload(file?: File) {
     if (!file) return;
+    const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+    const sizeStr = file.size > 1024 * 1024 ? `${sizeMb} MB` : `${Math.round(file.size / 1024)} KB`;
+
+    setImportState({
+      isImporting: true,
+      fileName: file.name,
+      fileSizeStr: sizeStr,
+      stage: "Allocating buffer & reading document...",
+      progress: 8,
+    });
+    setError("");
+
     try {
-      setError("");
       // Scan the document pages and dynamically extract real fields and real bboxes
-      const { pages: loadedPages, fields: extractedFields } = await loadDocument(file);
+      const { pages: loadedPages, fields: extractedFields } = await loadDocument(
+        file,
+        (stage, percent) => {
+          setImportState((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  stage,
+                  progress: percent !== undefined ? percent : prev.progress,
+                }
+              : null
+          );
+        }
+      );
+
       setPages(loadedPages);
       setDocName(file.name);
       setFields(extractedFields);
@@ -316,10 +351,33 @@ export default function App() {
       setUndoStack([]);
       setRedoStack([]);
       pushNavHistory(1, extractedFields[0]?.id || null);
+      showToast(`✓ Successfully imported ${file.name} (${extractedFields.length} extracted fields).`);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Could not read that file. Please upload a PDF, PNG or JPG.");
+      setError(err instanceof Error ? err.message : "Could not read that file. Please upload a PDF, PNG, JPG, or SVG.");
+    } finally {
+      setImportState(null);
     }
   }
+
+  // Drag and drop importing
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (!isDraggingFile) setIsDraggingFile(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+    setIsDraggingFile(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingFile(false);
+    const droppedFile = e.dataTransfer.files?.[0];
+    if (droppedFile) {
+      handleFileUpload(droppedFile);
+    }
+  };
 
   // Page switching helper
   const handleSelectPage = (pageNum: number) => {
@@ -644,7 +702,25 @@ export default function App() {
   }, [fields]);
 
   return (
-    <div className="invoice-app-shell">
+    <div
+      className={`invoice-app-shell ${isDraggingFile ? "dragover-zone" : ""}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* Drag & Drop Overlay */}
+      {isDraggingFile && (
+        <div className="drag-drop-overlay">
+          <div className="drag-drop-modal">
+            <div className="drag-drop-icon">📥</div>
+            <h2 className="drag-drop-title">Drop Invoice Document Here</h2>
+            <p className="drag-drop-sub">
+              Supports multi-page PDF, PNG, JPG, WebP, and SVG with automatic OCR field extraction
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Header Bar */}
       <header className="app-header">
         <div className="header-left">
@@ -723,25 +799,33 @@ export default function App() {
           <button
             className="btn btn-secondary"
             onClick={() => handleLoadSample(true)}
+            disabled={importState?.isImporting}
             title="Reset to sample invoice (clears saved upload and opens demo invoice)"
           >
             ↺ Reset to Sample
           </button>
 
-          <label className="btn btn-primary file-upload-label" title="Import PDF, PNG, JPG, JPEG, WebP, or SVG invoice document">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-              <polyline points="7 10 12 15 17 10"></polyline>
-              <line x1="12" y1="15" x2="12" y2="3"></line>
-            </svg>
-            <span>Import Docs</span>
-            <input
-              type="file"
-              accept=".pdf,application/pdf,image/png,image/jpeg,image/jpg,image/webp,image/svg+xml,.svg,.png,.jpg,.jpeg,.webp"
-              hidden
-              onChange={(e) => handleFileUpload(e.target.files?.[0])}
-            />
-          </label>
+          {importState?.isImporting ? (
+            <div className="btn btn-primary btn-spiral-loading" title="Importing document...">
+              <SpiralSpinner size={16} />
+              <span>Importing...</span>
+            </div>
+          ) : (
+            <label className="btn btn-primary file-upload-label" title="Import PDF, PNG, JPG, JPEG, WebP, or SVG invoice document">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              <span>Import Docs</span>
+              <input
+                type="file"
+                accept=".pdf,application/pdf,image/png,image/jpeg,image/jpg,image/webp,image/svg+xml,.svg,.png,.jpg,.jpeg,.webp"
+                hidden
+                onChange={(e) => handleFileUpload(e.target.files?.[0])}
+              />
+            </label>
+          )}
 
           <div className="header-divider"></div>
 
@@ -800,28 +884,39 @@ export default function App() {
       )}
 
       {/* Main Workspace Layout */}
-      {!pages.length ? (
+      {!pages.length && !importState?.isImporting ? (
         <div className="empty-state-hero">
           <div className="empty-card">
             <div className="empty-icon-ring">📄</div>
             <h2>No Invoice Loaded</h2>
             <p>Import a PDF, image, or SVG invoice to review extracted fields in the exact order they appear on the document.</p>
             <div className="empty-actions">
-              <label className="btn btn-primary btn-large file-upload-label">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                  <polyline points="7 10 12 15 17 10"></polyline>
-                  <line x1="12" y1="15" x2="12" y2="3"></line>
-                </svg>
-                <span>Import Docs</span>
-                <input
-                  type="file"
-                  accept=".pdf,application/pdf,image/png,image/jpeg,image/jpg,image/webp,image/svg+xml,.svg,.png,.jpg,.jpeg,.webp"
-                  hidden
-                  onChange={(e) => handleFileUpload(e.target.files?.[0])}
-                />
-              </label>
-              <button className="btn btn-secondary btn-large" onClick={() => handleLoadSample(true)}>
+              {importState?.isImporting ? (
+                <div className="btn btn-primary btn-large btn-spiral-loading">
+                  <SpiralSpinner size={20} />
+                  <span>Importing Document...</span>
+                </div>
+              ) : (
+                <label className="btn btn-primary btn-large file-upload-label">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="7 10 12 15 17 10"></polyline>
+                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                  </svg>
+                  <span>Import Docs</span>
+                  <input
+                    type="file"
+                    accept=".pdf,application/pdf,image/png,image/jpeg,image/jpg,image/webp,image/svg+xml,.svg,.png,.jpg,.jpeg,.webp"
+                    hidden
+                    onChange={(e) => handleFileUpload(e.target.files?.[0])}
+                  />
+                </label>
+              )}
+              <button
+                className="btn btn-secondary btn-large"
+                onClick={() => handleLoadSample(true)}
+                disabled={importState?.isImporting}
+              >
                 Explore With Sample Invoice
               </button>
             </div>
@@ -933,20 +1028,24 @@ export default function App() {
             </div>
 
             <div className="viewer-scroll-area">
-              <DocViewer
-                pages={pages}
-                fields={fields}
-                activeId={activeId}
-                activePage={activePage}
-                viewMode={viewMode}
-                onSelectField={handleSelectField}
-                onPageChange={(p) => handleSelectPage(p)}
-                onDraw={(page, bbox) =>
-                  setManualField({ page, bbox, name: "", value: "" })
-                }
-                showDevCoords={showDevCoords}
-                zoomLevel={zoomLevel}
-              />
+              {importState?.isImporting ? (
+                <DocumentSkeleton importState={importState} />
+              ) : (
+                <DocViewer
+                  pages={pages}
+                  fields={fields}
+                  activeId={activeId}
+                  activePage={activePage}
+                  viewMode={viewMode}
+                  onSelectField={handleSelectField}
+                  onPageChange={(p) => handleSelectPage(p)}
+                  onDraw={(page, bbox) =>
+                    setManualField({ page, bbox, name: "", value: "" })
+                  }
+                  showDevCoords={showDevCoords}
+                  zoomLevel={zoomLevel}
+                />
+              )}
             </div>
           </section>
 
@@ -957,17 +1056,19 @@ export default function App() {
                 className={`tab-btn ${activeTab === "fields" ? "active" : ""}`}
                 onClick={() => setActiveTab("fields")}
               >
-                Invoice Fields ({fields.length})
+                Invoice Fields ({importState?.isImporting ? "..." : fields.length})
               </button>
               <button
                 className={`tab-btn ${activeTab === "log" ? "active" : ""}`}
                 onClick={() => setActiveTab("log")}
               >
-                Audit Log ({log.length})
+                Audit Log ({importState?.isImporting ? "..." : log.length})
               </button>
             </div>
 
-            {activeTab === "fields" ? (
+            {importState?.isImporting ? (
+              <SidebarSkeleton />
+            ) : activeTab === "fields" ? (
               <div className="sidebar-tab-content">
                 {/* Field Navigation Bar: Prev/Next Field & Undo/Redo */}
                 <div className="field-stepper-bar">

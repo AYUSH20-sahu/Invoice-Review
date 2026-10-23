@@ -135,8 +135,3 @@ This makes highlights impervious to layout zoom, responsive container shrink, an
 - **Empty Field Values**: Displays clear italicized `(empty)` placeholder without breaking layout; logs transitions from/to empty values accurately.
 - **Dragging Outside Document Bounds**: Clamps drag coordinates strictly within `[0, PAGE_W]` and `[0, pageHeight]`, filtering out clicks smaller than 8px.
 
----
-
-## 🎬 2-Minute Loom Video Script
-
-See [LOOM_SCRIPT.md](./LOOM_SCRIPT.md) for the exact word-for-word walkthrough script formatted with 15s intro, 75s file walkthrough, 30s architectural improvements, and 10s wrap-up.

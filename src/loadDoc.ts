@@ -169,13 +169,18 @@ export async function scanCanvasPageForSpans(
  * 1st scans the document page for all text, words, and coordinates.
  * Then dynamically extracts information found on the document without any hardcoded templates.
  */
-export async function loadDocument(file: File): Promise<DocLoadResult> {
+export type ProgressCallback = (status: string, percent?: number) => void;
+
+export async function loadDocument(
+  file: File,
+  onProgress?: ProgressCallback
+): Promise<DocLoadResult> {
   const isPdf =
     file.type === "application/pdf" ||
     file.name.toLowerCase().endsWith(".pdf");
 
   if (isPdf) {
-    return loadPDFDocument(file);
+    return loadPDFDocument(file, onProgress);
   }
 
   const isSvg =
@@ -183,7 +188,7 @@ export async function loadDocument(file: File): Promise<DocLoadResult> {
     file.name.toLowerCase().endsWith(".svg");
 
   if (isSvg) {
-    return loadSvgDocument(file);
+    return loadSvgDocument(file, onProgress);
   }
 
   const isImage =
@@ -191,7 +196,7 @@ export async function loadDocument(file: File): Promise<DocLoadResult> {
     /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i.test(file.name);
 
   if (isImage) {
-    return loadImageDocument(file);
+    return loadImageDocument(file, onProgress);
   }
 
   throw new Error("Unsupported file format. Please upload a PDF, PNG, JPG, JPEG, WebP, or SVG document.");
@@ -202,8 +207,11 @@ export async function loadDocument(file: File): Promise<DocLoadResult> {
  * Renders every page at 2x resolution normalized to 612 CSS pt width,
  * scans all text content and coordinates, and dynamically extracts all fields.
  */
-async function loadPDFDocument(file: File): Promise<DocLoadResult> {
+async function loadPDFDocument(file: File, onProgress?: ProgressCallback): Promise<DocLoadResult> {
+  onProgress?.("Reading document binary stream...", 15);
   const buffer = await file.arrayBuffer();
+
+  onProgress?.("Initializing PDF.js engine...", 25);
   const pdf = await pdfjs.getDocument({
     data: new Uint8Array(buffer),
     cMapUrl: "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/cmaps/",
@@ -215,6 +223,9 @@ async function loadPDFDocument(file: File): Promise<DocLoadResult> {
   let firstPageCanvas: HTMLCanvasElement | null = null;
 
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const pagePercent = Math.round(25 + ((pageNum - 0.5) / pdf.numPages) * 45);
+    onProgress?.(`Rendering page ${pageNum} of ${pdf.numPages} at 2x retina...`, pagePercent);
+
     const page = await pdf.getPage(pageNum);
     const unscaledViewport = page.getViewport({ scale: 1 });
     const scale = PAGE_W / unscaledViewport.width;
@@ -284,14 +295,19 @@ async function loadPDFDocument(file: File): Promise<DocLoadResult> {
     }
   }
 
+  onProgress?.("Analyzing text spans and OCR layers...", 75);
+
   // If the document has no embedded vector text (e.g. scanned image PDF), scan the rendered page canvas
   if (allSpans.length === 0 && firstPageCanvas) {
+    onProgress?.("Scanning canvas pixels for text regions...", 80);
     const scanned = await scanCanvasPageForSpans(firstPageCanvas, 1, pages[0]?.height || 792);
     allSpans.push(...scanned);
   }
 
-  // First scan the document, then dynamically extract all information found
+  onProgress?.("Extracting fields and normalizing bounding boxes...", 90);
   const extractedFields = analyzeDocumentSpans(allSpans, pages);
+
+  onProgress?.("Finalizing invoice review workspace...", 98);
 
   return {
     pages,
@@ -798,7 +814,8 @@ function analyzeDocumentSpans(spans: TextSpan[], pages: Page[]): Field[] {
 /**
  * SVG document loader with vector text extraction and dynamic canvas rendering
  */
-async function loadSvgDocument(file: File): Promise<DocLoadResult> {
+async function loadSvgDocument(file: File, onProgress?: ProgressCallback): Promise<DocLoadResult> {
+  onProgress?.("Reading SVG vector markup...", 20);
   const svgText = await file.text();
 
   // Extract dimensions from viewBox or width/height attributes
@@ -820,6 +837,7 @@ async function loadSvgDocument(file: File): Promise<DocLoadResult> {
   const scale = PAGE_W / svgW;
   const pageH = Math.round(svgH * scale);
 
+  onProgress?.("Extracting SVG text elements...", 45);
   // Extract vector text spans if <text> elements are present
   const spans: TextSpan[] = [];
   const textElemRegex = /<text[^>]*\bx\s*=\s*["']([\d.-]+)["'][^>]*\by\s*=\s*["']([\d.-]+)["'][^>]*>([^<]+)<\/text>/gi;
@@ -842,6 +860,7 @@ async function loadSvgDocument(file: File): Promise<DocLoadResult> {
     });
   }
 
+  onProgress?.("Rendering SVG to 2x retina canvas...", 65);
   // Render SVG onto 2x retina canvas
   const canvas = document.createElement("canvas");
   canvas.width = PAGE_W * 2;
@@ -864,6 +883,7 @@ async function loadSvgDocument(file: File): Promise<DocLoadResult> {
 
   // If no raw <text> tags in SVG (e.g. paths/shapes), scan rendered canvas
   if (spans.length === 0) {
+    onProgress?.("Scanning rendered SVG canvas for text regions...", 80);
     const scanned = await scanCanvasPageForSpans(canvas, 1, pageH);
     spans.push(...scanned);
   }
@@ -875,6 +895,7 @@ async function loadSvgDocument(file: File): Promise<DocLoadResult> {
     pageNumber: 1,
   };
 
+  onProgress?.("Extracting fields and normalizing bounding boxes...", 92);
   const fields = analyzeDocumentSpans(spans, [page]);
 
   return {
@@ -886,7 +907,8 @@ async function loadSvgDocument(file: File): Promise<DocLoadResult> {
 /**
  * Image loader with dynamic scanning
  */
-async function loadImageDocument(file: File): Promise<DocLoadResult> {
+async function loadImageDocument(file: File, onProgress?: ProgressCallback): Promise<DocLoadResult> {
+  onProgress?.("Decoding image data...", 20);
   const url = URL.createObjectURL(file);
   const img = new Image();
 
@@ -900,6 +922,7 @@ async function loadImageDocument(file: File): Promise<DocLoadResult> {
   const baseH = img.naturalHeight || 792;
   const heightIn612Space = Math.round((baseH / baseW) * PAGE_W);
 
+  onProgress?.("Rendering to 2x retina canvas...", 50);
   const canvas = document.createElement("canvas");
   canvas.width = PAGE_W * 2;
   canvas.height = heightIn612Space * 2;
@@ -917,8 +940,11 @@ async function loadImageDocument(file: File): Promise<DocLoadResult> {
     pageNumber: 1,
   };
 
+  onProgress?.("Scanning canvas pixels for text regions...", 75);
   // Scan the image canvas for text and coordinates
   const spans = await scanCanvasPageForSpans(canvas, 1, heightIn612Space);
+
+  onProgress?.("Extracting fields and normalizing bounding boxes...", 92);
   const fields = analyzeDocumentSpans(spans, [page]);
 
   return {
